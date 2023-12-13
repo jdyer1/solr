@@ -16,24 +16,14 @@
  */
 package org.apache.solr.client.solrj.io.stream;
 
-import static org.apache.solr.security.Sha256AuthenticationProvider.getSaltedHashedValue;
-
-import java.io.IOException;
-import java.lang.invoke.MethodHandles;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 import org.apache.solr.client.solrj.SolrRequest;
 import org.apache.solr.client.solrj.io.Tuple;
 import org.apache.solr.client.solrj.request.CollectionAdminRequest;
 import org.apache.solr.client.solrj.request.QueryRequest;
 import org.apache.solr.client.solrj.request.UpdateRequest;
+import org.apache.solr.client.solrj.response.UpdateResponse;
 import org.apache.solr.cloud.SolrCloudTestCase;
+import org.apache.solr.common.SolrDocumentList;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.cloud.DocCollection;
 import org.apache.solr.common.cloud.Replica;
@@ -47,6 +37,19 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static org.apache.solr.security.Sha256AuthenticationProvider.getSaltedHashedValue;
 
 /**
  * tests various streaming expressions (via the SolrJ {@link SolrStream} API) against a SolrCloud
@@ -166,6 +169,46 @@ public class CloudAuthStreamTest extends SolrCloudTestCase {
             .getStatus());
   }
 
+  private void addDocumentExpectSuccess(String user, String collection, String idVal) {
+    try {
+      UpdateResponse resp = setBasicAuthCredentials(new UpdateRequest(), user).add(sdoc("id", idVal)).process(cluster.getSolrClient(), collection);
+      assertEquals("got non-zero status " + resp.getStatus() + " when attempting to add for user " + user + " and collection " + collection + " and id=" + idVal, 0, resp.getStatus());
+    } catch(Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  private void addDocumentExpectError(int errorCode, String user, String collection, String idVal) {
+    try {
+      UpdateResponse resp = setBasicAuthCredentials(new UpdateRequest(), user).commit(cluster.getSolrClient(), collection);
+      fail("Update succeeded when expected to fail with error "  + errorCode + ". user=" + user + " /collection=" + collection + " /idVal=" + idVal + " /status=" + resp.getStatus());
+    } catch(SolrException se) {
+      assertEquals("Update failed with wrong code for user=" + user + " /collection=" + collection + " /idVal=" + idVal, errorCode, se.code());
+    } catch(Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  private void  commitExpectSuccess(String user, String collection) {
+    try {
+      UpdateResponse resp = setBasicAuthCredentials(new UpdateRequest(), user).commit(cluster.getSolrClient(), collection);
+      assertEquals("got non-zero status " + resp.getStatus() + " when attempting to commit for user " + user + " and collection " + collection, 0, resp.getStatus());
+    } catch(Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  private void commitExpectError(int errorCode, String user, String collection) {
+    try {
+      UpdateResponse resp = setBasicAuthCredentials(new UpdateRequest(), user).commit(cluster.getSolrClient(), collection);
+      fail("Commit succeeded when expected to fail with error "  + errorCode + ". user=" + user + " /collection=" + collection + " /status=" + resp.getStatus());
+    } catch(SolrException se) {
+      assertEquals("Commit failed with wrong code for user=" + user + " /collection=" + collection, errorCode, se.code());
+    } catch(Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
   /** Simple sanity checks that authentication is working the way the test expects */
   public void testSanityCheckAuth() throws Exception {
 
@@ -186,57 +229,24 @@ public class CloudAuthStreamTest extends SolrCloudTestCase {
                           .getNumFound();
                 })
             .code());
+  addDocumentExpectSuccess(WRITE_X_USER, COLLECTION_X, "1_from_write_X_user");
+  commitExpectSuccess(WRITE_X_USER, COLLECTION_X);
 
-    assertEquals(
-        "sanity check of update to X from write_X user",
-        0,
-        (setBasicAuthCredentials(new UpdateRequest(), WRITE_X_USER)
-                .add(sdoc("id", "1_from_write_X_user"))
-                .commit(cluster.getSolrClient(), COLLECTION_X))
-            .getStatus());
+  addDocumentExpectError(403, READ_ONLY_USER, COLLECTION_X, "1_from_write_X_user");
+  commitExpectError(403, READ_ONLY_USER, COLLECTION_X);
 
-    assertEquals(
-        "sanity check of update to X from read only user",
-        500, // should be 403, but CloudSolrClient lies on updates for now: SOLR-14222
-        expectThrows(
-                SolrException.class,
-                () -> {
-                  final int ignored =
-                      (setBasicAuthCredentials(new UpdateRequest(), READ_ONLY_USER)
-                              .add(sdoc("id", "2_from_read_only_user"))
-                              .commit(cluster.getSolrClient(), COLLECTION_X))
-                          .getStatus();
-                })
-            .code());
+    addDocumentExpectError(403, WRITE_Y_USER, COLLECTION_X, "3_from_write_Y_user");
+    commitExpectError(403, WRITE_Y_USER, COLLECTION_X);
 
-    assertEquals(
-        "sanity check of update to X from write_Y user",
-        500, // should be 403, but CloudSolrClient lies on updates for now: SOLR-14222
-        expectThrows(
-                SolrException.class,
-                () -> {
-                  final int ignored =
-                      (setBasicAuthCredentials(new UpdateRequest(), WRITE_Y_USER)
-                              .add(sdoc("id", "3_from_write_Y_user"))
-                              .commit(cluster.getSolrClient(), COLLECTION_X))
-                          .getStatus();
-                })
-            .code());
-
-    assertEquals(
-        "sanity check of update to Y from write_Y user",
-        0,
-        (setBasicAuthCredentials(new UpdateRequest(), WRITE_Y_USER)
-                .add(sdoc("id", "1_from_write_Y_user"))
-                .commit(cluster.getSolrClient(), COLLECTION_Y))
-            .getStatus());
+    addDocumentExpectSuccess(WRITE_Y_USER, COLLECTION_Y, "1_from_write_Y_user");
+    commitExpectSuccess(WRITE_Y_USER, COLLECTION_Y);
 
     for (String user : Arrays.asList(READ_ONLY_USER, WRITE_Y_USER, WRITE_X_USER)) {
       for (String collection : Arrays.asList(COLLECTION_X, COLLECTION_Y)) {
         assertEquals(
             "sanity check: query " + collection + " from user: " + user,
             1,
-            countDocsInCollection(collection, user));
+            countDocsInCollection("SANITY", collection, user));
       }
     }
   }
@@ -915,6 +925,25 @@ public class CloudAuthStreamTest extends SolrCloudTestCase {
             .commit(cluster.getSolrClient(), collection)
             .getStatus());
     return countDocsInCollection(collection, user);
+  }
+
+  protected static long countDocsInCollection(String msg, final String collection, final String user)
+          throws Exception {
+    SolrDocumentList sdl =  setBasicAuthCredentials(
+            new QueryRequest(
+                    params(
+                            "q", "*:*",
+                            "rows", "100",
+                            "_trace", "count_via_" + user + ":" + collection)),
+            user)
+            .process(cluster.getSolrClient(), collection)
+            .getResults();
+    assertTrue(msg + ": not exact results.", sdl.getNumFoundExact());
+    for(int i=0 ; i< sdl.size() ; i++) {
+      log.error(msg + " | " + collection + " | " + user + " | " + i + " | " + sdl.get(i).getFieldValueMap());
+    }
+
+    return sdl.getNumFound();
   }
 
   /**
